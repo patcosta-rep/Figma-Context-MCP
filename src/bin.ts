@@ -46,6 +46,11 @@ const argv = cli({
       description:
         "Base directory for image downloads. The download tool will only write files within this directory. Defaults to the current working directory.",
     },
+    inlineImages: {
+      type: Boolean,
+      description:
+        "Return images from download_figma_images inline (base64) instead of saving them, for agents with no shared filesystem",
+    },
     proxy: {
       type: String,
       description:

@@ -8,8 +8,8 @@ import type { ToolExtra } from "./progress.js";
 import {
   downloadFigmaImagesTool,
   getFigmaDataTool,
-  type DownloadImagesParams,
   type GetFigmaDataParams,
+  type InlineImagesParams,
 } from "./tools/index.js";
 
 const serverInfo = {
@@ -26,11 +26,18 @@ export type CreateServerOptions = {
   outputFormat?: OutputFormat;
   skipImageDownloads?: boolean;
   imageDir?: string;
+  inlineImages?: boolean;
 };
 
 function createServer(
   authOptions: FigmaAuthOptions,
-  { transport, outputFormat = "tree", skipImageDownloads = false, imageDir }: CreateServerOptions,
+  {
+    transport,
+    outputFormat = "tree",
+    skipImageDownloads = false,
+    imageDir,
+    inlineImages = false,
+  }: CreateServerOptions,
 ) {
   const server = new McpServer(serverInfo);
   const figmaService = new FigmaService(authOptions);
@@ -48,6 +55,7 @@ function createServer(
     outputFormat,
     skipImageDownloads,
     imageDir,
+    inlineImages,
     getClientInfo,
   });
 
@@ -69,6 +77,7 @@ type RegisterToolsOptions = {
   outputFormat: OutputFormat;
   skipImageDownloads: boolean;
   imageDir?: string;
+  inlineImages: boolean;
   getClientInfo: () => ClientInfo | undefined;
 };
 
@@ -99,18 +108,23 @@ function registerTools(
 
   if (!options.skipImageDownloads) {
     server.registerTool(
-      downloadFigmaImagesTool.name,
+      options.inlineImages ? downloadFigmaImagesTool.inlineName : downloadFigmaImagesTool.name,
       {
-        title: "Download Figma Images",
-        description: downloadFigmaImagesTool.getDescription(options.imageDir),
-        inputSchema: downloadFigmaImagesTool.parametersSchema,
-        annotations: { openWorldHint: true },
+        title: options.inlineImages ? "Get Figma Images" : "Download Figma Images",
+        description: downloadFigmaImagesTool.getDescription(options.imageDir, options.inlineImages),
+        inputSchema: options.inlineImages
+          ? downloadFigmaImagesTool.inlineParametersSchema
+          : downloadFigmaImagesTool.parametersSchema,
+        annotations: options.inlineImages
+          ? { readOnlyHint: true }
+          : { openWorldHint: true },
       },
-      (params: DownloadImagesParams, extra: ToolExtra) =>
+      (params: InlineImagesParams & { localPath?: string }, extra: ToolExtra) =>
         downloadFigmaImagesTool.handler(
           params,
           figmaService,
           options.imageDir,
+          options.inlineImages,
           options.transport,
           options.authMode,
           options.getClientInfo(),

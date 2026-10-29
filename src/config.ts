@@ -21,6 +21,7 @@ export interface ServerFlags {
   format?: string;
   skipImageDownloads?: boolean;
   imageDir?: string;
+  inlineImages?: boolean;
   proxy?: string;
   stdio?: boolean;
   noTelemetry?: boolean;
@@ -34,6 +35,7 @@ export interface ServerConfig {
   outputFormat: OutputFormat;
   skipImageDownloads: boolean;
   imageDir: string;
+  inlineImages: boolean;
   isStdioMode: boolean;
   noTelemetry: boolean;
   configSources: Record<string, Source>;
@@ -160,6 +162,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     envImageDir ? resolvePath(envImageDir) : undefined,
     process.cwd(),
   );
+  const inlineImages = resolve(flags.inlineImages, envBool("INLINE_IMAGES"), false);
 
   // Only resolve explicit proxy config here. Standard env vars (HTTPS_PROXY, HTTP_PROXY,
   // NO_PROXY) are handled by undici's EnvHttpProxyAgent at the dispatcher level, which
@@ -193,6 +196,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     outputFormat: outputFormat.source,
     skipImageDownloads: skipImageDownloads.source,
     imageDir: imageDir.source,
+    inlineImages: inlineImages.source,
     telemetry: telemetrySource,
   };
 
@@ -220,6 +224,9 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
       `- SKIP_IMAGE_DOWNLOADS: ${skipImageDownloads.value} (source: ${configSources.skipImageDownloads})`,
     );
     console.log(`- IMAGE_DIR: ${imageDir.value} (source: ${configSources.imageDir})`);
+    console.log(
+      `- INLINE_IMAGES: ${inlineImages.value} (source: ${configSources.inlineImages})`,
+    );
     const telemetryEnabled = resolveTelemetryEnabled(noTelemetry);
     console.log(
       `- TELEMETRY: ${telemetryEnabled ? "enabled" : "disabled"} (source: ${configSources.telemetry})`,
@@ -235,6 +242,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     outputFormat: outputFormat.value,
     skipImageDownloads: skipImageDownloads.value,
     imageDir: imageDir.value,
+    inlineImages: inlineImages.value,
     isStdioMode,
     noTelemetry,
     configSources,

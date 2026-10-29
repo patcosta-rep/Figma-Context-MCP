@@ -1,3 +1,5 @@
+import { mkdtemp, readFile, rm } from "fs/promises";
+import os from "os";
 import path from "path";
 import { z } from "zod";
 import {
@@ -91,44 +93,64 @@ const parameters = {
 const parametersSchema = z.object(parameters);
 export type DownloadImagesParams = z.infer<typeof parametersSchema>;
 
+// Inline mode has nowhere to save to, so the destination parameter would only
+// mislead the model into thinking files land somewhere it can use.
+const inlineParametersSchema = parametersSchema.omit({ localPath: true });
+export type InlineImagesParams = z.infer<typeof inlineParametersSchema>;
+
+type ImageContent = { type: "image"; data: string; mimeType: string };
+type TextContent = { type: "text"; text: string };
+
 async function downloadFigmaImages(
-  params: DownloadImagesParams,
+  params: InlineImagesParams & { localPath?: string },
   figmaService: FigmaService,
   imageDir: string | undefined,
+  inlineImages: boolean,
   transport: Transport,
   authMode: AuthMode,
   clientInfo: ClientInfo | undefined,
   extra: ToolExtra,
 ) {
+  // Inline mode still runs the shared download pipeline, which works on files
+  // (cropping, dimension reads), so it gets a private scratch dir that is
+  // removed once the bytes are read back.
+  let scratchDir: string | undefined;
   try {
-    const { fileKey, nodes, localPath, pngScale } = parametersSchema.parse(params);
+    const { fileKey, nodes, pngScale } = inlineParametersSchema.parse(params);
 
-    // Resolve localPath against the configured image directory. The resolver
-    // accepts relative paths and absolute paths that fall under imageDir; it
-    // rejects absolute paths pointing elsewhere (which would silently miswrite
-    // under the previous join-based logic). See utils/local-path.ts.
-    const baseDir = imageDir ?? process.cwd();
-    const resolution = resolveLocalPath(localPath, baseDir);
-    if (!resolution.ok) {
-      // Path-traversal rejection happens after schema validation, so the SDK
-      // wrapper in mcp/index.ts never sees it. Capture it here as a validation
-      // reject so we can track how often LLMs trip over the localPath contract.
-      const details = rejectionDetails(resolution.reason, localPath, baseDir);
-      captureValidationReject(
-        {
-          tool: "download_figma_images",
-          field: "localPath",
-          rule: details.rule,
-          message: details.telemetryMessage,
-        },
-        { transport, authMode, clientInfo },
-      );
-      return {
-        isError: true,
-        content: [{ type: "text" as const, text: details.userMessage }],
-      };
+    let resolvedPath: string;
+    if (inlineImages) {
+      scratchDir = await mkdtemp(path.join(os.tmpdir(), "figma-images-"));
+      resolvedPath = scratchDir;
+    } else {
+      const { localPath } = parametersSchema.parse(params);
+      // Resolve localPath against the configured image directory. The resolver
+      // accepts relative paths and absolute paths that fall under imageDir; it
+      // rejects absolute paths pointing elsewhere (which would silently miswrite
+      // under the previous join-based logic). See utils/local-path.ts.
+      const baseDir = imageDir ?? process.cwd();
+      const resolution = resolveLocalPath(localPath, baseDir);
+      if (!resolution.ok) {
+        // Path-traversal rejection happens after schema validation, so the SDK
+        // wrapper in mcp/index.ts never sees it. Capture it here as a validation
+        // reject so we can track how often LLMs trip over the localPath contract.
+        const details = rejectionDetails(resolution.reason, localPath, baseDir);
+        captureValidationReject(
+          {
+            tool: "download_figma_images",
+            field: "localPath",
+            rule: details.rule,
+            message: details.telemetryMessage,
+          },
+          { transport, authMode, clientInfo },
+        );
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: details.userMessage }],
+        };
+      }
+      resolvedPath = resolution.resolvedPath;
     }
-    const resolvedPath = resolution.resolvedPath;
 
     await sendProgress(extra, 0, 3, "Resolving image downloads");
 
@@ -174,6 +196,15 @@ async function downloadFigmaImages(
       })
       .join("\n");
 
+    if (inlineImages) {
+      const inlined = await Promise.all(downloads.map(({ result }) => inlineImage(result.filePath)));
+      const content: [TextContent, ...Array<ImageContent | TextContent>] = [
+        { type: "text", text: `Fetched ${successCount} images:\n${imagesList}` },
+        ...inlined,
+      ];
+      return { content };
+    }
+
     return {
       content: [
         {
@@ -199,10 +230,48 @@ async function downloadFigmaImages(
         },
       ],
     };
+  } finally {
+    if (scratchDir) await rm(scratchDir, { recursive: true, force: true });
   }
 }
 
-function getDescription(imageDir?: string) {
+/**
+ * SVG goes back as markup: it is text the model can read directly, and vision
+ * APIs don't accept image/svg+xml anyway.
+ */
+async function inlineImage(filePath: string): Promise<ImageContent | TextContent> {
+  const bytes = await readFile(filePath);
+  const mimeType = sniffRasterMimeType(bytes);
+  if (!mimeType) {
+    return { type: "text", text: `${path.basename(filePath)}:\n${bytes.toString("utf-8")}` };
+  }
+  return { type: "image", data: bytes.toString("base64"), mimeType };
+}
+
+/**
+ * The extension can't be trusted: image fills keep Figma's original bytes, so a
+ * JPEG upload is saved under the `.png` name the model asked for, and vision
+ * APIs reject an image whose declared type doesn't match its bytes.
+ */
+function sniffRasterMimeType(bytes: Buffer): string | undefined {
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.subarray(0, 4).toString("ascii") === "GIF8") return "image/gif";
+  if (
+    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+    bytes.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return undefined;
+}
+
+function getDescription(imageDir: string | undefined, inlineImages: boolean) {
+  if (inlineImages) {
+    return "Fetch SVG and PNG images used in a Figma file based on the IDs of image or icon nodes. PNG and GIF images are returned inline so you can see them; SVGs are returned as markup. Nothing is saved to disk.";
+  }
   const baseDir = imageDir ?? process.cwd();
   return `Download SVG and PNG images used in a Figma file based on the IDs of image or icon nodes. Images will be saved relative to the server's image directory: ${baseDir}`;
 }
@@ -248,7 +317,11 @@ function rejectionDetails(
 // Export tool configuration
 export const downloadFigmaImagesTool = {
   name: "download_figma_images",
+  // Nothing is downloaded anywhere the caller can reach, so the inline variant
+  // is named for what it gives back.
+  inlineName: "get_figma_images",
   getDescription,
   parametersSchema,
+  inlineParametersSchema,
   handler: downloadFigmaImages,
 } as const;
