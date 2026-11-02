@@ -11,6 +11,7 @@ import {
 } from "~/telemetry/index.js";
 import { downloadFigmaImages as runDownloadFigmaImages } from "../../services/download-figma-images.js";
 import type { FigmaService } from "../../services/figma.js";
+import { formatCacheNotice, type ImageUrlCache } from "../../services/response-cache.js";
 import { type ResolveLocalPathFailureReason, resolveLocalPath } from "../../utils/local-path.js";
 import { Logger } from "../../utils/logger.js";
 import { sendProgress, startProgressHeartbeat, type ToolExtra } from "../progress.js";
@@ -100,6 +101,18 @@ export type InlineImagesParams = z.infer<typeof inlineParametersSchema>;
 
 type ImageContent = { type: "image"; data: string; mimeType: string };
 type TextContent = { type: "text"; text: string };
+/**
+ * The age note is its own content block, matching `get_figma_data`, so the
+ * download summary stays a stable second block when a URL was reused.
+ */
+export function toDownloadImagesContent(
+  summary: string,
+  cache?: { ageMs: number; ttlMs: number },
+): Array<{ type: "text"; text: string }> {
+  const body = { type: "text" as const, text: summary };
+  if (!cache) return [body];
+  return [{ type: "text" as const, text: formatCacheNotice(cache.ageMs, cache.ttlMs) }, body];
+}
 
 async function downloadFigmaImages(
   params: InlineImagesParams & { localPath?: string },
@@ -110,6 +123,7 @@ async function downloadFigmaImages(
   authMode: AuthMode,
   clientInfo: ClientInfo | undefined,
   extra: ToolExtra,
+  imageUrlCache?: ImageUrlCache,
 ) {
   // Inline mode still runs the shared download pipeline, which works on files
   // (cropping, dimension reads), so it gets a private scratch dir that is
@@ -155,7 +169,7 @@ async function downloadFigmaImages(
     await sendProgress(extra, 0, 3, "Resolving image downloads");
 
     let stopHeartbeat: (() => void) | undefined;
-    const { downloads, successCount } = await runDownloadFigmaImages(
+    const { downloads, successCount, cache } = await runDownloadFigmaImages(
       figmaService,
       { fileKey, nodes, localPath: resolvedPath, pngScale },
       {
@@ -173,7 +187,14 @@ async function downloadFigmaImages(
             clientInfo,
           }),
       },
+      imageUrlCache,
     );
+
+    if (cache) {
+      Logger.log(
+        `Reused cached image URLs for ${fileKey} (${cache.ageMs}ms old, TTL ${cache.ttlMs}ms)`,
+      );
+    }
 
     await sendProgress(extra, 2, 3, `Downloaded ${successCount} images, formatting response`);
 
@@ -198,25 +219,28 @@ async function downloadFigmaImages(
 
     if (inlineImages) {
       const inlined = await Promise.all(downloads.map(({ result }) => inlineImage(result.filePath)));
+      const [first, ...notes] = toDownloadImagesContent(
+        `Fetched ${successCount} images:\n${imagesList}`,
+        cache,
+      );
       const content: [TextContent, ...Array<ImageContent | TextContent>] = [
-        { type: "text", text: `Fetched ${successCount} images:\n${imagesList}` },
+        first,
+        ...notes,
         ...inlined,
       ];
       return { content };
     }
 
     return {
-      content: [
-        {
-          type: "text" as const,
-          // Echo the absolute resolved path so callers can immediately verify
-          // where files landed. If imageDir defaulted to a server cwd that
-          // doesn't match the user's project, this surfaces the mismatch
-          // instead of letting it look like a successful no-op. Code-fenced
-          // so markdown-rendering clients don't fight separator characters.
-          text: `Downloaded ${successCount} images to \`${resolvedPath}\`:\n${imagesList}`,
-        },
-      ],
+      content: toDownloadImagesContent(
+        // Echo the absolute resolved path so callers can immediately verify
+        // where files landed. If imageDir defaulted to a server cwd that
+        // doesn't match the user's project, this surfaces the mismatch
+        // instead of letting it look like a successful no-op. Code-fenced
+        // so markdown-rendering clients don't fight separator characters.
+        `Downloaded ${successCount} images to \`${resolvedPath}\`:\n${imagesList}`,
+        cache,
+      ),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -27,7 +27,7 @@ function figmaServiceWriting(files: Record<string, Buffer | string>, seenDirs: s
   return {
     downloadImages: async (_fileKey: string, localPath: string, items: { fileName: string }[]) => {
       seenDirs.push(localPath);
-      return Promise.all(
+      const images = await Promise.all(
         items.map(async ({ fileName }) => {
           const filePath = path.join(localPath, fileName);
           await writeFile(filePath, files[fileName]);
@@ -41,6 +41,7 @@ function figmaServiceWriting(files: Record<string, Buffer | string>, seenDirs: s
           };
         }),
       );
+      return { images, cacheHit: false };
     },
   } as unknown as Parameters<typeof downloadFigmaImagesTool.handler>[1];
 }

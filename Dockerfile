@@ -16,10 +16,12 @@ COPY --from=build /app/dist ./dist
 # The server binds 127.0.0.1 by default, which is unreachable from outside the container.
 # 8000 is the port the catalog assumes for runtimes whose docs don't name one.
 # Images go back inline: the agents calling this runtime can't see its filesystem.
+# Each runtime is one user's long-lived pod, so a cache spares their Figma quota on repeat reads.
 ENV FRAMELINK_HOST=0.0.0.0 \
     FRAMELINK_PORT=8000 \
     FRAMELINK_TELEMETRY=off \
-    INLINE_IMAGES=true
+    INLINE_IMAGES=true \
+    CACHE_TTL=30m
 EXPOSE 8000
 USER node
 CMD ["node", "dist/bin.js"]

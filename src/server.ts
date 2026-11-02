@@ -8,6 +8,9 @@ import { Logger } from "./utils/logger.js";
 import { hasProxyEnv, setProxyMode } from "./utils/proxy-env.js";
 import { createServer, type CreateServerOptions } from "./mcp/index.js";
 import { requireGlobalCredentials, type ServerConfig } from "./config.js";
+import type { CachedFigmaData } from "./services/get-figma-data.js";
+import { ImageUrlCache, ResponseCache } from "./services/response-cache.js";
+import { formatDuration } from "./utils/duration.js";
 import type { FigmaAuthOptions } from "./services/figma.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -64,18 +67,40 @@ export async function startServer(config: ServerConfig): Promise<void> {
     );
   }
 
+  // One pair of caches for the process. HTTP builds a new MCP server per
+  // request (see startHttpServer), so neither cache can live on that server.
+  // Both take the same TTL so one setting bounds how stale any Figma read
+  // can be, whichever tool made it.
+  const responseCache =
+    config.cacheTtlMs > 0 ? new ResponseCache<CachedFigmaData>(config.cacheTtlMs) : undefined;
+  const imageUrlCache =
+    config.cacheTtlMs > 0 && !config.skipImageDownloads
+      ? new ImageUrlCache(config.cacheTtlMs)
+      : undefined;
+
   const serverOptions = {
     transport: config.isStdioMode ? ("stdio" as const) : ("http" as const),
     outputFormat: config.outputFormat,
     skipImageDownloads: config.skipImageDownloads,
     imageDir: config.imageDir,
     inlineImages: config.inlineImages,
+    responseCache,
+    imageUrlCache,
   };
 
   if (config.isStdioMode) {
     // MCP clients spawn stdio servers with whatever cwd they were started in,
     // which is rarely the user's project root. Warn so a missing --image-dir
     // doesn't silently send images to e.g. the client's install directory.
+    if (responseCache) {
+      const imageNote = imageUrlCache
+        ? " Image URL lookups are cached too; the files are still downloaded."
+        : "";
+      process.stderr.write(
+        `Figma response cache enabled (TTL ${formatDuration(responseCache.ttlMs)}). ` +
+          `Cached results are labeled with their age and may be stale.${imageNote}\n`,
+      );
+    }
     // Gated on the download tool writing to disk at all — when it is skipped or
     // inlines its images the warning is misleading.
     if (
